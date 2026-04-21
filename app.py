@@ -1,11 +1,10 @@
 import streamlit as st
-from streamlit_localstorage import LocalStorage
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
+import json
 
-# ========== 页面配置 ==========
 st.set_page_config(page_title="暖阳炒股模拟器", layout="wide", initial_sidebar_state="collapsed")
 
 # ========== 自定义CSS（明亮清新主题）==========
@@ -61,9 +60,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ========== 初始化 LocalStorage ==========
-ls = LocalStorage()
-
 # ========== 生成股价数据（固定）==========
 start_date = datetime(2026, 4, 10)
 end_date = datetime(2026, 5, 29)
@@ -83,36 +79,79 @@ df_prices = pd.DataFrame(price_data, index=date_list)
 def get_price(date, stock):
     return df_prices.loc[date, stock]
 
-# ========== 从浏览器加载用户数据 ==========
-def load_user_data():
-    cash = ls.getItem("cash")
-    holdings = ls.getItem("holdings")
-    transactions = ls.getItem("transactions")
-    if cash is None:
-        return 5000.0, {s:0 for s in stocks}, []
-    else:
-        return float(cash), holdings, transactions
+# ========== 纯前端 localStorage 支持（无额外依赖）==========
+# 注入 JS 代码，实现数据自动保存和加载
+js_code = """
+<script>
+function saveToLocalStorage(data) {
+    localStorage.setItem('stock_simulator_data', JSON.stringify(data));
+}
+function loadFromLocalStorage() {
+    var data = localStorage.getItem('stock_simulator_data');
+    if (data) {
+        var input = document.getElementById('hidden_storage_input');
+        if (input) {
+            input.value = data;
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+        }
+    }
+}
+window.onload = loadFromLocalStorage;
+// 监听 Streamlit 渲染，将当前 session_state 保存到 localStorage
+function syncToLocalStorage() {
+    var dataDiv = document.getElementById('session_data_content');
+    if (dataDiv && dataDiv.innerText) {
+        try {
+            var data = JSON.parse(dataDiv.innerText);
+            saveToLocalStorage(data);
+        } catch(e) {}
+    }
+}
+setInterval(syncToLocalStorage, 500);
+</script>
+"""
+st.markdown(js_code, unsafe_allow_html=True)
 
-# ========== 保存用户数据到浏览器 ==========
-def save_user_data(cash, holdings, transactions):
-    ls.setItem("cash", cash)
-    ls.setItem("holdings", holdings)
-    ls.setItem("transactions", transactions)
+# 隐藏的 div 用于存放序列化的 session_state（供 JS 读取）
+serialized_data = json.dumps({
+    "cash": st.session_state.get("cash", 5000.0),
+    "holdings": st.session_state.get("holdings", {s:0 for s in stocks}),
+    "transactions": st.session_state.get("transactions", []),
+    "watchlist": st.session_state.get("watchlist", ["比亚迪", "东方财富"])
+})
+st.markdown(f'<div id="session_data_content" style="display:none;">{serialized_data}</div>', unsafe_allow_html=True)
 
-# ========== 初始化 session_state ==========
+# 隐藏的 textarea 用于接收从 localStorage 加载的数据
+stored_data = st.text_area("", key="hidden_storage_input", label_visibility="collapsed", value="")
+st.markdown('<style>#hidden_storage_input { display: none; }</style>', unsafe_allow_html=True)
+
+# 恢复数据
+if stored_data and stored_data.strip():
+    try:
+        restored = json.loads(stored_data)
+        if "cash" not in st.session_state:
+            st.session_state.cash = restored.get("cash", 5000.0)
+            st.session_state.holdings = restored.get("holdings", {s:0 for s in stocks})
+            st.session_state.transactions = restored.get("transactions", [])
+            st.session_state.watchlist = restored.get("watchlist", ["比亚迪", "东方财富"])
+    except:
+        pass
+
+# 初始化 session_state 默认值
 if "cash" not in st.session_state:
-    cash, holdings, transactions = load_user_data()
-    st.session_state.cash = cash
-    st.session_state.holdings = holdings
-    st.session_state.transactions = transactions
-
-def auto_save():
-    save_user_data(st.session_state.cash, st.session_state.holdings, st.session_state.transactions)
-
-# ========== 交易记录与提示 ==========
+    st.session_state.cash = 5000.0
+if "holdings" not in st.session_state:
+    st.session_state.holdings = {s:0 for s in stocks}
+if "transactions" not in st.session_state:
+    st.session_state.transactions = []
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = ["比亚迪", "东方财富"]
 if "toast_msg" not in st.session_state:
     st.session_state.toast_msg = None
+if "quick_buy_stock" not in st.session_state:
+    st.session_state.quick_buy_stock = "招商银行"
 
+# 辅助函数：交易记录
 def record_transaction(date, stock, action, qty, price, amount, success=True):
     if success:
         st.session_state.transactions.append({
@@ -123,11 +162,11 @@ def record_transaction(date, stock, action, qty, price, amount, success=True):
             "价格": round(price, 2),
             "金额": round(amount, 2)
         })
-        auto_save()
-        st.session_state.toast_msg = f"✅ {action} {qty} 股 {stock} 成功！花费/获得 {amount:.2f} 元"
+        st.session_state.toast_msg = f"✅ {action} {qty} 股 {stock} 成功！{'花费' if action=='买入' else '获得'} {amount:.2f} 元"
     else:
         st.session_state.toast_msg = f"❌ {action} 失败：{'现金不足' if action=='买入' else '持股不足'}"
 
+# 显示提示消息
 if st.session_state.toast_msg:
     if "✅" in st.session_state.toast_msg:
         st.markdown(f'<div class="success-message">{st.session_state.toast_msg}</div>', unsafe_allow_html=True)
@@ -135,7 +174,7 @@ if st.session_state.toast_msg:
         st.markdown(f'<div class="error-message">{st.session_state.toast_msg}</div>', unsafe_allow_html=True)
     st.session_state.toast_msg = None
 
-# ========== 计算总资产 ==========
+# 计算总资产
 def get_total_asset(date):
     stock_val = sum(st.session_state.holdings[s] * get_price(date, s) for s in stocks)
     return st.session_state.cash + stock_val
@@ -146,7 +185,7 @@ profit = total_asset - 5000
 profit_rate = (profit / 5000) * 100
 market_value = total_asset - st.session_state.cash
 
-# ========== 顶部指标卡片 ==========
+# 顶部指标卡片
 st.markdown(f"""
 <div style="display: flex; justify-content: space-between; gap: 1rem; margin-bottom: 2rem;">
     <div class="card" style="flex:1; text-align:center;"><div style="font-size:0.9rem; color:#475569;">总资产</div><div class="metric-value">{total_asset:.2f} 元</div></div>
@@ -156,7 +195,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ========== 两列布局 ==========
+# 两列布局
 col_left, col_right = st.columns([0.6, 0.4], gap="large")
 
 with col_left:
@@ -172,8 +211,6 @@ with col_left:
         st.markdown('</div>', unsafe_allow_html=True)
     
     # 自选股
-    if "watchlist" not in st.session_state:
-        st.session_state.watchlist = ["比亚迪", "东方财富"]
     with st.container():
         st.markdown('<div class="card"><h3 style="margin-top:0;">⭐ 自选股</h3>', unsafe_allow_html=True)
         available = [s for s in stocks if s not in st.session_state.watchlist]
@@ -210,8 +247,7 @@ with col_right:
         st.markdown('<div class="card"><h3 style="margin-top:0;">💰 快捷交易</h3>', unsafe_allow_html=True)
         selected_date = st.date_input("交易日", value=start_date, min_value=start_date, max_value=end_date, key="trade_date")
         selected_date = pd.Timestamp(selected_date)
-        default_stock = getattr(st.session_state, "quick_buy_stock", "招商银行")
-        stock_choice = st.selectbox("股票", stocks, index=stocks.index(default_stock) if default_stock in stocks else 0)
+        stock_choice = st.selectbox("股票", stocks, index=stocks.index(st.session_state.quick_buy_stock) if st.session_state.quick_buy_stock in stocks else 0)
         action = st.radio("方向", ["买入", "卖出"], horizontal=True)
         qty = st.number_input("数量（股）", min_value=1, step=1, value=1)
         price = get_price(selected_date, stock_choice)
@@ -238,7 +274,7 @@ with col_right:
                     st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-# ========== 下方标签页 ==========
+# 下方标签页
 tab1, tab2, tab3 = st.tabs(["💼 我的持仓", "📈 资产曲线", "📜 交易明细"])
 with tab1:
     holdings_list = []
@@ -286,7 +322,7 @@ with tab3:
     else:
         st.info("📜 暂无交易记录")
 
-# ========== 侧边栏结算 ==========
+# 侧边栏结算
 with st.sidebar:
     st.markdown("### 🎯 模拟结算")
     if st.button("结束模拟并计算最终收益"):
