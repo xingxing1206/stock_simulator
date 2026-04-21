@@ -2,14 +2,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import json
+import os
 from datetime import datetime, timedelta
 
-# 页面配置
+# ========== 页面配置 ==========
 st.set_page_config(page_title="专业炒股模拟器", layout="wide")
 st.sidebar.title("📌 导航菜单")
 page = st.sidebar.radio("选择页面", ["📈 交易", "💼 持仓", "📜 交易记录", "📊 结算与曲线"])
 
-# 生成日期范围 2026-04-10 至 2026-05-29
+# ========== 生成股价数据（2026-04-10 至 2026-05-29）==========
 start_date = datetime(2026, 4, 10)
 end_date = datetime(2026, 5, 29)
 date_list = []
@@ -18,7 +19,6 @@ while current <= end_date:
     date_list.append(current)
     current += timedelta(days=1)
 
-# 生成模拟股价（固定随机种子）
 np.random.seed(42)
 stocks = ["招商银行", "贵州茅台", "宁德时代"]
 base_prices = {"招商银行": 35.0, "贵州茅台": 1650.0, "宁德时代": 180.0}
@@ -34,60 +34,42 @@ df_prices = pd.DataFrame(price_data, index=date_list)
 def get_price(date, stock):
     return df_prices.loc[date, stock]
 
-# 初始化 session_state（如果还没有）
-if "cash" not in st.session_state:
-    st.session_state.cash = 5000.0
-if "holdings" not in st.session_state:
-    st.session_state.holdings = {stock: 0 for stock in stocks}
-if "transactions" not in st.session_state:
-    st.session_state.transactions = []
+# ========== 数据持久化：使用本地文件（仅当在本地运行时生效，云端仅演示）==========
+DATA_FILE = "user_data.json"
 
-# ========== 保存/加载进度功能 ==========
-def save_progress():
+def load_data():
+    """从文件加载数据，如果文件不存在则返回默认值"""
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("cash", 5000.0), data.get("holdings", {s:0 for s in stocks}), data.get("transactions", [])
+        except:
+            pass
+    return 5000.0, {s:0 for s in stocks}, []
+
+def save_data(cash, holdings, transactions):
+    """保存数据到文件"""
     data = {
-        "cash": st.session_state.cash,
-        "holdings": st.session_state.holdings,
-        "transactions": st.session_state.transactions
+        "cash": cash,
+        "holdings": holdings,
+        "transactions": transactions
     }
-    return json.dumps(data, ensure_ascii=False, indent=2)
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def load_progress(json_str):
-    try:
-        data = json.loads(json_str)
-        st.session_state.cash = data["cash"]
-        st.session_state.holdings = data["holdings"]
-        st.session_state.transactions = data["transactions"]
-        st.success("进度加载成功！")
-        return True
-    except Exception as e:
-        st.error(f"加载失败：{e}")
-        return False
+# 初始化 session_state
+if "cash" not in st.session_state:
+    cash, holdings, transactions = load_data()
+    st.session_state.cash = cash
+    st.session_state.holdings = holdings
+    st.session_state.transactions = transactions
 
-# 在侧边栏添加保存/加载按钮
-st.sidebar.markdown("---")
-st.sidebar.subheader("💾 进度管理")
+# 自动保存函数（每次修改后调用）
+def auto_save():
+    save_data(st.session_state.cash, st.session_state.holdings, st.session_state.transactions)
 
-# 保存按钮：生成下载链接
-progress_json = save_progress()
-st.sidebar.download_button(
-    label="💾 保存当前进度",
-    data=progress_json,
-    file_name="stock_progress.json",
-    mime="application/json"
-)
-
-# 加载按钮：上传文件
-uploaded_file = st.sidebar.file_uploader("📂 加载进度文件", type=["json"])
-if uploaded_file is not None:
-    content = uploaded_file.read().decode("utf-8")
-    if load_progress(content):
-        st.sidebar.success("进度已恢复！请切换到其他页面刷新数据。")
-        # 强制刷新页面？不需要，session_state已经更新，但页面需要重新渲染
-        st.rerun()
-
-st.sidebar.info("提示：关闭浏览器前请点击「保存当前进度」下载文件，下次打开时上传该文件即可恢复所有数据。")
-
-# 辅助函数：记录交易
+# ========== 辅助函数 ==========
 def record_transaction(date, stock, action, qty, price, amount):
     st.session_state.transactions.append({
         "日期": date.strftime("%Y-%m-%d"),
@@ -97,6 +79,7 @@ def record_transaction(date, stock, action, qty, price, amount):
         "价格": round(price, 2),
         "金额": round(amount, 2)
     })
+    auto_save()  # 每次交易后自动保存
 
 # ========== 页面1：交易 ==========
 if page == "📈 交易":
@@ -119,7 +102,6 @@ if page == "📈 交易":
         with col2:
             action = st.radio("操作", ["买入", "卖出"], horizontal=True)
         with col3:
-            # 默认数量改为 1
             qty = st.number_input("数量（股）", min_value=1, step=1, value=1)
         submitted = st.form_submit_button("确认交易", use_container_width=True)
         
