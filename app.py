@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
-import plotly.graph_objects as go
 
 # ========== 页面配置 ==========
 st.set_page_config(page_title="实时模拟炒股系统", layout="wide")
