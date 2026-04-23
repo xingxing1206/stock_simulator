@@ -3,10 +3,11 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
+import numpy as np
 
-st.set_page_config(page_title="真股模拟器", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="模拟炒股系统", layout="wide", initial_sidebar_state="collapsed")
 
-# ========== 自定义CSS（明亮毛玻璃）==========
+# ========== 自定义CSS ==========
 st.markdown("""
 <style>
 .stApp { background: linear-gradient(135deg, #f0f4ff 0%, #e8edfc 100%); }
@@ -37,11 +38,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ========== 加载真实历史数据（2026-04-10 至 2026-04-23）==========
+# ========== 获取真实历史数据（2026-04-10 至 今天）==========
 @st.cache_data
 def load_real_data():
     start = "2026-04-10"
-    end = "2026-04-23"  # 今天日期，固定为2026-04-23（作业提交日期）
+    end = datetime.today().strftime("%Y-%m-%d")  # 到今天为止
     stocks = {
         "招商银行": "600036.SS",
         "贵州茅台": "600519.SS",
@@ -51,11 +52,15 @@ def load_real_data():
     }
     data = {}
     for name, symbol in stocks.items():
-        df = yf.download(symbol, start=start, end=end, progress=False)
-        if not df.empty:
-            data[name] = df['Close']
-        else:
-            # 如果获取失败（比如非交易日），生成模拟数据作为后备
+        try:
+            df = yf.download(symbol, start=start, end=end, progress=False)
+            if not df.empty:
+                data[name] = df['Close']
+            else:
+                raise ValueError("No data")
+        except:
+            # 如果网络或数据问题，生成模拟数据（但会提示）
+            st.warning(f"⚠️ 无法获取 {name} 真实数据，使用模拟数据")
             dates = pd.date_range(start, end)
             np.random.seed(42)
             base = {"招商银行":35, "贵州茅台":1650, "宁德时代":180, "比亚迪":230, "东方财富":25}[name]
@@ -63,12 +68,17 @@ def load_real_data():
             for _ in range(len(dates)-1):
                 prices.append(prices[-1] * (1 + np.random.uniform(-0.03,0.03)))
             data[name] = pd.Series(prices, index=dates)
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    # 只保留所有股票都有数据的日期（交易日）
+    df = df.dropna()
+    return df
 
 df_prices = load_real_data()
-# 只保留交易日（有数据的日期）
-df_prices = df_prices.dropna()
 date_list = df_prices.index.tolist()
+if not date_list:
+    st.error("无法加载任何数据，请检查网络后刷新")
+    st.stop()
+
 start_date = date_list[0]
 end_date = date_list[-1]
 
@@ -108,11 +118,11 @@ if st.session_state.toast_msg:
 
 # ========== 资产计算 ==========
 latest_date = end_date
-total_asset = st.session_state.cash + sum(st.session_state.holdings[s] * get_price(latest_date, s) for s in df_prices.columns)
+total_stock_value = sum(st.session_state.holdings[s] * get_price(latest_date, s) for s in df_prices.columns)
+total_asset = st.session_state.cash + total_stock_value
 profit = total_asset - 5000
 profit_rate = (profit/5000)*100
 
-# 顶部卡片
 st.markdown(f"""
 <div style="display:flex; gap:1rem;">
     <div class="glass-card" style="flex:1; text-align:center;">💰 总资产<br><span class="metric-value">{total_asset:.2f}</span>元</div>
@@ -123,18 +133,15 @@ st.markdown(f"""
 
 # ========== 交易区域 ==========
 st.markdown('<div class="glass-card"><h3>⚡ 真实历史交易</h3>', unsafe_allow_html=True)
-# 日期选择器：只能选已有的交易日
-selected_date = st.selectbox("📅 选择交易日（真实历史已收盘）", date_list, index=len(date_list)-1, format_func=lambda x: x.strftime("%Y-%m-%d"))
+selected_date = st.selectbox("📅 选择交易日（真实历史收盘价）", date_list, index=len(date_list)-1, format_func=lambda x: x.strftime("%Y-%m-%d"))
 selected_date = pd.Timestamp(selected_date)
 
-# 显示当日股价
-st.subheader(f"📊 {selected_date.strftime('%Y-%m-%d')} 真实收盘价")
+st.subheader(f"📊 {selected_date.strftime('%Y-%m-%d')} 收盘价")
 cols = st.columns(len(df_prices.columns))
 for i, stock in enumerate(df_prices.columns):
     price = get_price(selected_date, stock)
     cols[i].metric(stock, f"{price:.2f} 元")
 
-# 交易表单
 col1, col2, col3 = st.columns(3)
 with col1:
     stock_choice = st.selectbox("股票", df_prices.columns)
@@ -214,7 +221,6 @@ with tab3:
     else:
         st.info("暂无交易")
 
-# 侧边栏结算
 with st.sidebar:
     if st.button("🎯 结束模拟并结算"):
         st.success(f"总资产：{total_asset:.2f} 元 | 收益：{profit:+.2f} 元 ({profit_rate:+.2f}%)")
