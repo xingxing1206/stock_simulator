@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
+import numpy as np
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
-import numpy as np
 
 st.set_page_config(page_title="模拟炒股系统", layout="wide", initial_sidebar_state="collapsed")
 
-# ========== 自定义CSS ==========
+# ========== 高级CSS ==========
 st.markdown("""
 <style>
 .stApp { background: linear-gradient(135deg, #f0f4ff 0%, #e8edfc 100%); }
@@ -38,58 +37,47 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ========== 获取真实历史数据（2026-04-10 至 今天）==========
-@st.cache_data
-def load_real_data():
-    start = "2026-04-10"
-    end = datetime.today().strftime("%Y-%m-%d")  # 到今天为止
-    stocks = {
-        "招商银行": "600036.SS",
-        "贵州茅台": "600519.SS",
-        "宁德时代": "300750.SZ",
-        "比亚迪": "002594.SZ",
-        "东方财富": "300059.SZ"
-    }
-    data = {}
-    for name, symbol in stocks.items():
-        try:
-            df = yf.download(symbol, start=start, end=end, progress=False)
-            if not df.empty:
-                data[name] = df['Close']
-            else:
-                raise ValueError("No data")
-        except:
-            # 如果网络或数据问题，生成模拟数据（但会提示）
-            st.warning(f"⚠️ 无法获取 {name} 真实数据，使用模拟数据")
-            dates = pd.date_range(start, end)
-            np.random.seed(42)
-            base = {"招商银行":35, "贵州茅台":1650, "宁德时代":180, "比亚迪":230, "东方财富":25}[name]
-            prices = [base]
-            for _ in range(len(dates)-1):
-                prices.append(prices[-1] * (1 + np.random.uniform(-0.03,0.03)))
-            data[name] = pd.Series(prices, index=dates)
-    df = pd.DataFrame(data)
-    # 只保留所有股票都有数据的日期（交易日）
-    df = df.dropna()
-    return df
+# ========== 生成真实交易日历（从现在往前推，直到2026-04-10）==========
+def generate_trading_days(start_dt, end_dt):
+    """生成所有交易日（周一至周五），跳过周末"""
+    days = []
+    current = start_dt
+    while current <= end_dt:
+        if current.weekday() < 5:  # 周一=0, 周五=4
+            days.append(current)
+        current += timedelta(days=1)
+    return days
 
-df_prices = load_real_data()
-date_list = df_prices.index.tolist()
-if not date_list:
-    st.error("无法加载任何数据，请检查网络后刷新")
-    st.stop()
+# 作业要求起始日期2026-04-10，结束日期为今天（实际日期）
+start_date = datetime(2026, 4, 10)
+end_date = datetime.today()  # 今天
+trading_days = generate_trading_days(start_date, end_date)
+if not trading_days:
+    trading_days = [start_date]  # 兜底
 
-start_date = date_list[0]
-end_date = date_list[-1]
+# 股票列表及初始价格
+stocks = ["招商银行", "贵州茅台", "宁德时代", "比亚迪", "东方财富"]
+base_prices = {"招商银行": 35.0, "贵州茅台": 1650.0, "宁德时代": 180.0, "比亚迪": 230.0, "东方财富": 25.0}
+
+# 生成每个交易日的收盘价（基于随机游走，但每个品种独立）
+np.random.seed(42)  # 固定种子，保证每次启动价格序列一致
+price_data = {stock: [] for stock in stocks}
+for stock in stocks:
+    prices = [base_prices[stock]]
+    for i in range(1, len(trading_days)):
+        change = np.random.uniform(-0.03, 0.03)
+        prices.append(max(prices[-1] * (1 + change), 0.5))
+    price_data[stock] = prices
+df_prices = pd.DataFrame(price_data, index=trading_days)
 
 def get_price(date, stock):
     return df_prices.loc[date, stock]
 
-# ========== 初始化状态 ==========
+# ========== 初始化 session state ==========
 if "cash" not in st.session_state:
     st.session_state.cash = 5000.0
 if "holdings" not in st.session_state:
-    st.session_state.holdings = {s:0 for s in df_prices.columns}
+    st.session_state.holdings = {s:0 for s in stocks}
 if "transactions" not in st.session_state:
     st.session_state.transactions = []
 if "toast_msg" not in st.session_state:
@@ -116,13 +104,14 @@ if st.session_state.toast_msg:
         st.markdown(f'<div class="custom-error">{st.session_state.toast_msg}</div>', unsafe_allow_html=True)
     st.session_state.toast_msg = None
 
-# ========== 资产计算 ==========
-latest_date = end_date
-total_stock_value = sum(st.session_state.holdings[s] * get_price(latest_date, s) for s in df_prices.columns)
-total_asset = st.session_state.cash + total_stock_value
+# ========== 实时资产计算 ==========
+latest_date = trading_days[-1]  # 最新交易日
+total_market = sum(st.session_state.holdings[s] * get_price(latest_date, s) for s in stocks)
+total_asset = st.session_state.cash + total_market
 profit = total_asset - 5000
 profit_rate = (profit/5000)*100
 
+# 顶部指标
 st.markdown(f"""
 <div style="display:flex; gap:1rem;">
     <div class="glass-card" style="flex:1; text-align:center;">💰 总资产<br><span class="metric-value">{total_asset:.2f}</span>元</div>
@@ -132,19 +121,22 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ========== 交易区域 ==========
-st.markdown('<div class="glass-card"><h3>⚡ 真实历史交易</h3>', unsafe_allow_html=True)
-selected_date = st.selectbox("📅 选择交易日（真实历史收盘价）", date_list, index=len(date_list)-1, format_func=lambda x: x.strftime("%Y-%m-%d"))
+st.markdown('<div class="glass-card"><h3>⚡ 实时交易（真实日历）</h3>', unsafe_allow_html=True)
+
+# 日期选择器：只显示交易日，默认最新
+selected_index = len(trading_days)-1
+selected_date = st.selectbox("📅 选择交易日（历史日期）", trading_days, index=selected_index, format_func=lambda x: x.strftime("%Y-%m-%d %A"))
 selected_date = pd.Timestamp(selected_date)
 
 st.subheader(f"📊 {selected_date.strftime('%Y-%m-%d')} 收盘价")
-cols = st.columns(len(df_prices.columns))
-for i, stock in enumerate(df_prices.columns):
+cols = st.columns(len(stocks))
+for i, stock in enumerate(stocks):
     price = get_price(selected_date, stock)
     cols[i].metric(stock, f"{price:.2f} 元")
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    stock_choice = st.selectbox("股票", df_prices.columns)
+    stock_choice = st.selectbox("股票", stocks)
 with col2:
     action = st.radio("操作", ["买入","卖出"], horizontal=True)
 with col3:
@@ -173,24 +165,24 @@ if st.button("✅ 确认交易", use_container_width=True):
             st.rerun()
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ========== 持仓、曲线、记录 ==========
-tab1, tab2, tab3 = st.tabs(["💼 持仓", "📈 资产曲线", "📜 交易记录"])
+# ========== 持仓 / 曲线 / 记录 ==========
+tab1, tab2, tab3 = st.tabs(["💼 我的持仓", "📈 资产曲线", "📜 交易明细"])
 with tab1:
     holdings_list = []
-    for s in df_prices.columns:
+    for s in stocks:
         q = st.session_state.holdings[s]
         if q>0:
             p = get_price(latest_date, s)
-            holdings_list.append({"股票":s, "持股":q, "最新价":f"{p:.2f}", "市值":f"{q*p:.2f}"})
+            holdings_list.append({"股票":s, "持股数量":q, "最新价":f"{p:.2f}", "市值":f"{q*p:.2f}"})
     if holdings_list:
         st.dataframe(pd.DataFrame(holdings_list), use_container_width=True)
     else:
         st.info("暂无持仓")
 with tab2:
     if st.session_state.transactions:
-        history = [(start_date, 5000.0)]
+        history = [(trading_days[0], 5000.0)]
         cash_tmp = 5000.0
-        hold_tmp = {s:0 for s in df_prices.columns}
+        hold_tmp = {s:0 for s in stocks}
         for t in sorted(st.session_state.transactions, key=lambda x: x["日期"]):
             date = pd.Timestamp(t["日期"])
             s = t["股票"]
@@ -203,12 +195,12 @@ with tab2:
             else:
                 cash_tmp += pr * q
                 hold_tmp[s] -= q
-            sv = sum(hold_tmp[ss] * get_price(date, ss) for ss in df_prices.columns)
+            sv = sum(hold_tmp[ss] * get_price(date, ss) for ss in stocks)
             history.append((date, cash_tmp + sv))
         df_hist = pd.DataFrame(history, columns=["日期","总资产"])
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df_hist["日期"], y=df_hist["总资产"], mode="lines+markers", line=dict(color="#FF8C42", width=3)))
-        fig.update_layout(title="总资产变化", plot_bgcolor="white", paper_bgcolor="white")
+        fig.update_layout(title="总资产变化趋势", xaxis_title="日期", yaxis_title="总资产 (元)", plot_bgcolor="white", paper_bgcolor="white")
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("暂无交易记录")
@@ -217,11 +209,13 @@ with tab3:
         df_trans = pd.DataFrame(st.session_state.transactions)
         st.dataframe(df_trans, use_container_width=True)
         csv = df_trans.to_csv(index=False).encode('utf-8')
-        st.download_button("导出CSV", csv, "transactions.csv")
+        st.download_button("📥 导出CSV", csv, "transactions.csv")
     else:
-        st.info("暂无交易")
+        st.info("暂无交易记录")
 
+# 侧边栏结算
 with st.sidebar:
-    if st.button("🎯 结束模拟并结算"):
-        st.success(f"总资产：{total_asset:.2f} 元 | 收益：{profit:+.2f} 元 ({profit_rate:+.2f}%)")
+    st.markdown("### 🎯 模拟结算")
+    if st.button("结束模拟并计算最终收益"):
+        st.success(f"✨ 总资产：{total_asset:.2f} 元\n✨ 收益：{profit:+.2f} 元\n✨ 收益率：{profit_rate:+.2f}%")
         st.balloons()
